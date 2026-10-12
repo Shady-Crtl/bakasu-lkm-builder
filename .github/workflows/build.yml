@@ -32,23 +32,29 @@ jobs:
             sudo ln -sf /usr/bin/${t}-18 /usr/local/bin/${t}
           done
 
+      - name: Download vendor_boot from release
+        run: |
+          curl -Lo vendor_boot.img \
+            https://github.com/Shady-Crtl/bakasu-lkm-builder/releases/download/V1/vendor_boot.img
+          ls -lh vendor_boot.img
+
       - name: Clone kernel source
         run: |
           git clone --depth=1 \
             https://android.googlesource.com/kernel/common \
             -b android16-6.12 \
-            $GITHUB_WORKSPACE/kernel_src
+            kernel_src
 
       - name: Inject BakaSU + SUSFS
         run: |
-          cd $GITHUB_WORKSPACE/kernel_src
+          cd kernel_src
           curl -LSs \
             https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh \
             | bash -s main
 
       - name: Configure kernel
         run: |
-          cd $GITHUB_WORKSPACE/kernel_src
+          cd kernel_src
           make O=out ARCH=arm64 \
             CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
@@ -69,7 +75,7 @@ jobs:
 
       - name: Build kernel
         run: |
-          cd $GITHUB_WORKSPACE/kernel_src
+          cd kernel_src
           make -j$(nproc) O=out ARCH=arm64 \
             CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu-
@@ -85,30 +91,25 @@ jobs:
 
       - name: Repack vendor_boot
         run: |
-          if [ ! -f "$GITHUB_WORKSPACE/vendor_boot.img" ]; then
-            echo "ERROR: vendor_boot.img مش موجود في الـ repo"
-            exit 1
-          fi
           mkdir /tmp/work && cd /tmp/work
-          cp "$GITHUB_WORKSPACE/vendor_boot.img" .
+          cp $GITHUB_WORKSPACE/vendor_boot.img .
           /tmp/magiskboot unpack vendor_boot.img
-          RAMDISK=$(ls ramdisk* vendor_ramdisk* 2>/dev/null | head -1)
-          if [ -n "$RAMDISK" ]; then
-            mkdir cpio_root && cd cpio_root
-            cpio -id < ../"$RAMDISK"
-            KO=$(find . -name "kernelsu.ko" | head -1)
-            if [ -n "$KO" ]; then
-              cp "$GITHUB_WORKSPACE/kernel_src/out/drivers/kernelsu/kernelsu.ko" "$KO"
-              echo "✓ Replaced: $KO"
-            else
-              mkdir -p lib/modules
-              cp "$GITHUB_WORKSPACE/kernel_src/out/drivers/kernelsu/kernelsu.ko" lib/modules/
-              echo "✓ Added to /lib/modules/"
-            fi
-            find . | cpio -o -H newc > ../"$RAMDISK"
-            cd ..
+          mkdir cpio_root && cd cpio_root
+          RAMDISK=$(ls /tmp/work/ramdisk* /tmp/work/vendor_ramdisk* 2>/dev/null | head -1)
+          cpio -id < "$RAMDISK"
+          KO=$(find . -name "kernelsu.ko" | head -1)
+          if [ -n "$KO" ]; then
+            cp $GITHUB_WORKSPACE/kernel_src/out/drivers/kernelsu/kernelsu.ko "$KO"
+            echo "✓ Replaced: $KO"
+          else
+            mkdir -p lib/modules
+            cp $GITHUB_WORKSPACE/kernel_src/out/drivers/kernelsu/kernelsu.ko lib/modules/
+            echo "✓ Added new"
           fi
+          find . | cpio -o -H newc > "$RAMDISK"
+          cd /tmp/work
           /tmp/magiskboot repack vendor_boot.img vendor_boot_new.img
+          ls -lh vendor_boot_new.img
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -116,6 +117,5 @@ jobs:
           name: bakasu-susfs-${{ github.run_number }}
           path: |
             /tmp/work/vendor_boot_new.img
-            ${{ github.workspace }}/kernel_src/out/arch/arm64/boot/Image
-            ${{ github.workspace }}/kernel_src/out/drivers/kernelsu/kernelsu.ko
+            kernel_src/out/drivers/kernelsu/kernelsu.ko
           retention-days: 7
