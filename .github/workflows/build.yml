@@ -1,0 +1,121 @@
+name: BakaSU + SUSFS Builder
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            git make bc bison flex zip unzip \
+            libssl-dev libelf-dev python3 \
+            lz4 zstd cpio \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
+
+      - name: Install Clang 18
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-18 lld-18 llvm-18
+          for t in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-strip; do
+            sudo ln -sf /usr/bin/${t}-18 /usr/local/bin/${t}
+          done
+
+      - name: Clone kernel source
+        run: |
+          git clone --depth=1 \
+            https://android.googlesource.com/kernel/common \
+            -b android16-6.12 \
+            $GITHUB_WORKSPACE/kernel_src
+
+      - name: Inject BakaSU + SUSFS
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_src
+          curl -LSs \
+            https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh \
+            | bash -s main
+
+      - name: Configure kernel
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_src
+          make O=out ARCH=arm64 \
+            CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            gki_defconfig
+          scripts/config --file out/.config \
+            -e CONFIG_KSU_SUSFS \
+            -e CONFIG_KSU_SUSFS_SUS_PATH \
+            -e CONFIG_KSU_SUSFS_SUS_MOUNT \
+            -e CONFIG_KSU_SUSFS_SUS_KSTAT \
+            -e CONFIG_KSU_SUSFS_SUS_OVERLAYFS \
+            -e CONFIG_KSU_SUSFS_TRY_UMOUNT \
+            -e CONFIG_KSU_SUSFS_SPOOF_UNAME \
+            -e CONFIG_KSU_SUSFS_ENABLE_LOG
+          make O=out ARCH=arm64 \
+            CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            olddefconfig
+
+      - name: Build kernel
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_src
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu-
+
+      - name: Get magiskboot
+        run: |
+          VER=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'][1:])")
+          curl -Lo /tmp/magisk.apk \
+            "https://github.com/topjohnwu/Magisk/releases/download/v${VER}/Magisk-v${VER}.apk"
+          unzip -p /tmp/magisk.apk lib/x86_64/libmagiskboot.so > /tmp/magiskboot
+          chmod +x /tmp/magiskboot
+
+      - name: Repack vendor_boot
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/vendor_boot.img" ]; then
+            echo "ERROR: vendor_boot.img مش موجود في الـ repo"
+            exit 1
+          fi
+          mkdir /tmp/work && cd /tmp/work
+          cp "$GITHUB_WORKSPACE/vendor_boot.img" .
+          /tmp/magiskboot unpack vendor_boot.img
+          RAMDISK=$(ls ramdisk* vendor_ramdisk* 2>/dev/null | head -1)
+          if [ -n "$RAMDISK" ]; then
+            mkdir cpio_root && cd cpio_root
+            cpio -id < ../"$RAMDISK"
+            KO=$(find . -name "kernelsu.ko" | head -1)
+            if [ -n "$KO" ]; then
+              cp "$GITHUB_WORKSPACE/kernel_src/out/drivers/kernelsu/kernelsu.ko" "$KO"
+              echo "✓ Replaced: $KO"
+            else
+              mkdir -p lib/modules
+              cp "$GITHUB_WORKSPACE/kernel_src/out/drivers/kernelsu/kernelsu.ko" lib/modules/
+              echo "✓ Added to /lib/modules/"
+            fi
+            find . | cpio -o -H newc > ../"$RAMDISK"
+            cd ..
+          fi
+          /tmp/magiskboot repack vendor_boot.img vendor_boot_new.img
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bakasu-susfs-${{ github.run_number }}
+          path: |
+            /tmp/work/vendor_boot_new.img
+            ${{ github.workspace }}/kernel_src/out/arch/arm64/boot/Image
+            ${{ github.workspace }}/kernel_src/out/drivers/kernelsu/kernelsu.ko
+          retention-days: 7
