@@ -16,7 +16,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y \
             git make bc bison flex zip unzip \
-            libssl-dev libelf-dev python3 \
+            libssl-dev libelf-dev libdw-dev python3 \
             lz4 zstd cpio \
             gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
